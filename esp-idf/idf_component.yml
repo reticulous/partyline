@@ -1,0 +1,9 @@
+description: "partyline: a Partyline voice-room client on spangap. The node holds the server Link; the browser window and the LCD app are views of its state."
+url: https://github.com/reticulous/partyline
+version: "0.1.0"
+license: "Apache-2.0"
+targets:
+  - esp32s3
+dependencies:
+  idf:
+    version: ">=5.5"

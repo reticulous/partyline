@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none"
+     stroke="#eef3f8" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Partyline: a microphone in front of a speech bubble — a room you talk in. -->
+  <path d="M30 10 h24 a4 4 0 0 1 4 4 v18 a4 4 0 0 1 -4 4 h-4 v7 l-8 -7 h-4"/>
+  <rect x="12" y="14" width="12" height="22" rx="6"/>
+  <path d="M6 30 a12 12 0 0 0 24 0 M18 42 v10 M11 54 h14"/>
+</svg>

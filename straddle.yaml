@@ -1,0 +1,35 @@
+# partyline — a Partyline voice-room client on spangap.
+#
+# Partyline is a Mumble-style group voice app for Reticulum: one server holds
+# rooms, each with a fixed codec profile, and clients hold one Link to it. The
+# partyline task is the client: it holds that Link, speaks the room protocol and
+# keeps room and member state in storage; audio passes through the lxst voice
+# session. The browser window, the LCD app and the CLI are views of that state.
+schema_version: 1
+name: reticulous/partyline
+prefix: partyline
+version: 0.1.0
+firmware: esp-idf
+browser: browser
+platforms: [idf]
+requires:
+  - reticulous/lxst
+services:
+  - { class: PartylineService, header: partyline.h }
+  - { class: PartylineApp, header: partyline_app.h, when: spangap/spangap-lcd }
+  - { class: PartylineTinyPage, header: partyline_tiny.h, when: spangap/tinylcd }
+
+browser_register:
+  - call: registerPartyline
+
+settings:
+  - at:
+      - { id: reticulum }
+      - { id: partyline, label: "Partyline", order: 9 }
+    rows:
+      - section: "Partyline"
+      - caption: "Voice rooms on Partyline servers. The Partyline app is where you pick a server, join a room and talk."
+      - text: { label: "Nick", key: "s.partyline.nick", placeholder: "the LXMF display name" }
+      - caption: "The name others in the room see."
+      - switch: { label: "Join without audio", key: "s.partyline.text_only" }
+      - caption: "Joins rooms for their text only: the server keeps you muted and deafened and sends you no voice."
