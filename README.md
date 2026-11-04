@@ -197,8 +197,12 @@ a field to add one by hash. A server's screen shows its description, access,
 status, who to connect as, the room to ask for, the passwords and the message
 of the day. The room screen has the members on the left (speakers lit,
 operator, muted, deaf and text-only marks), the text on the right and a
-composer below; its talk bar shows how to talk in this room, lights while
-transmitting, and is itself a hold-to-talk button. While that screen is up
+composer below; its talk bar shows how to talk in this room ("Hold
+Mic/Space" on the T-Deck), lights while transmitting with the microphone
+level as a strip along its foot, and is itself a hold-to-talk button. Beside
+it, Mute (a microphone, struck through while muted) and Deafen (a headset,
+struck through while deafened) are icon toggles, amber-edged while on, and
+Rooms opens the room list. While that screen is up
 and no text field has focus, holding Space talks; the board's talk key always
 does. From there, the room list moves between rooms, a member's card shows
 their identity, hops and round trip and sends a poke, and the info page shows

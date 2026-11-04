@@ -19,9 +19,11 @@
  *     and Forget (which asks first).
  *   - Room: the header names the room and server, with the room's codec
  *     profile and a PTT marker for a push-to-talk room. Under it the talk bar,
- *     lit while lxst.talking is 1, saying how to talk here (or "listen only",
- *     "text only", or partyline.tx_blocked's reason when the first hop
- *     carries none of our audio), with the Mute / Deafen toggles and Rooms. The members of
+ *     lit while lxst.talking is 1 with the microphone level (lxstMicLevel())
+ *     along its foot, saying how to talk here (or "listen only", "text only",
+ *     or partyline.tx_blocked's reason when the first hop carries none of our
+ *     audio), with the Mute (microphone) and Deafen (headset) icon toggles,
+ *     amber-edged while on, and Rooms. The members of
  *     the room are a column on the left, the speaking ones lit green, with
  *     operator (@), muted, deafened and text-only marks; the text log is on
  *     the right; the composer is at the bottom. The talk bar is also a hold
@@ -51,6 +53,7 @@
 #include "lcd_app.h"
 #include "lcd_input_box.h"
 #include "lcd_keys.h"
+#include "lxst.h"
 #include "partyline_app.h"
 #include "storage.h"
 #include "esp_timer.h"
@@ -93,6 +96,7 @@ const uint32_t C_DIALOG  = 0x20262E;   /* dialog box, toast */
 const uint32_t C_SPEAK   = 0x173A24;   /* a speaking member's row */
 const uint32_t C_TALKRDY = 0x172331;   /* talk bar, ready */
 const uint32_t C_TALKDN  = 0x1D4F80;   /* talk bar, held before the session keys */
+const uint32_t C_LEVEL   = 0x9FE0B0;   /* the microphone level along the talk bar's foot */
 
 const lv_font_t* kFont      = &lv_font_montserrat_12_latin;
 const lv_font_t* kBold      = &lv_font_montserrat_12_latin;
@@ -108,6 +112,7 @@ void refreshFont() {
 }
 
 int hdrH()    { return lcdPx(26); }
+int btnIconPx() { return lcdPx(16); }
 int membersW() { return lcdPx(104); }
 
 const uint32_t DEBOUNCE_MS = 80;       /* storage bursts fold into one refresh */
@@ -117,6 +122,12 @@ const int      TEXT_LIMIT  = 300;      /* partyline's text limit, bytes */
 const int      LXMF_SLOTS  = 10;       /* identity slots offered in the chooser */
 
 const char* const NODE_IDENT = "secrets.rnsd.identity";
+
+/* The toggle icons: lxst's microphone glyphs and partyline's headset ones. */
+const char* const IC_MIC      = "phone-mic";
+const char* const IC_MIC_OFF  = "phone-mic-off";
+const char* const IC_HEADSET     = "partyline-headset";
+const char* const IC_HEADSET_OFF = "partyline-headset-off";
 
 /* ---- text ---- */
 
@@ -596,10 +607,66 @@ void showIf(lv_obj_t* o, bool on) {
     else    lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
 }
 
+/* ---- in-app icons: rasterized off the lcd task, so an image that is not yet
+ * cached is re-sourced by a short settle timer once it lands ---- */
+
+struct IconRef { lv_obj_t* img; const char* base; int px; bool set; };
+std::vector<IconRef> g_icons;
+lv_timer_t* g_iconTimer = nullptr;
+int g_iconTicks = 0;
+
+bool sourceIcon(IconRef& r) {
+    const lv_image_dsc_t* dsc = lcdIconDsc(r.base, r.px);
+    if (dsc) { lv_image_set_src(r.img, dsc); r.set = true; }
+    else lcdIconRequest(r.base, r.px);
+    return r.set;
+}
+void iconTimerCb(lv_timer_t*) {
+    bool all = true;
+    for (auto& r : g_icons) if (!r.set && !sourceIcon(r)) all = false;
+    if (all || ++g_iconTicks >= 50) {   /* ~4 s cap */
+        lv_timer_delete(g_iconTimer);
+        g_iconTimer = nullptr;
+    }
+}
+void iconSettle() {
+    g_iconTicks = 0;
+    if (!g_iconTimer) g_iconTimer = lv_timer_create(iconTimerCb, 80, nullptr);
+}
+void onIconGone(lv_event_t* e) {
+    lv_obj_t* o = lv_event_get_target_obj(e);
+    g_icons.erase(std::remove_if(g_icons.begin(), g_icons.end(),
+                                 [o](const IconRef& r) { return r.img == o; }), g_icons.end());
+}
+/* Point an icon image at another glyph and tint (the rasters are monochrome). */
+void setIcon(lv_obj_t* img, const char* base, uint32_t color) {
+    if (!img) return;
+    lv_obj_set_style_image_recolor(img, lv_color_hex(color), 0);
+    lv_obj_set_style_image_recolor_opa(img, LV_OPA_COVER, 0);
+    for (auto& r : g_icons) {
+        if (r.img != img) continue;
+        if (r.base != base) { r.base = base; r.set = false; }
+        if (!r.set && !sourceIcon(r)) iconSettle();
+        return;
+    }
+}
+lv_obj_t* mkIcon(lv_obj_t* parent, const char* base, int px, uint32_t color) {
+    lv_obj_t* img = lv_image_create(parent);
+    lv_obj_remove_flag(img, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(img, px, px);
+    g_icons.push_back({ img, base, px, false });
+    lv_obj_add_event_cb(img, onIconGone, LV_EVENT_DELETE, nullptr);
+    setIcon(img, base, color);
+    return img;
+}
+
 enum BtnStyle { BTN_PRIMARY, BTN_GHOST, BTN_DANGER };
 
+/* A button with a label, or with an icon instead when `icon` is given (the
+ * Mute and Deafen toggles). */
 lv_obj_t* mkButton(lv_obj_t* parent, const std::string& text, BtnStyle st,
-                   lv_event_cb_t cb, void* ud = nullptr, lv_obj_t** lblOut = nullptr) {
+                   lv_event_cb_t cb, void* ud = nullptr, lv_obj_t** lblOut = nullptr,
+                   const char* icon = nullptr, lv_obj_t** iconOut = nullptr) {
     lv_obj_t* b = lv_button_create(parent);
     lv_obj_remove_style_all(b);
     lv_obj_set_size(b, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
@@ -621,8 +688,13 @@ lv_obj_t* mkButton(lv_obj_t* parent, const std::string& text, BtnStyle st,
     /* A toggle that is on (Mute, Deafen) is amber-edged. */
     lv_obj_set_style_border_color(b, lv_color_hex(C_AMBER), LV_STATE_CHECKED);
     focusRing(b);
-    lv_obj_t* l = mkLabel(b, text, tc, kBtn);
-    if (lblOut) *lblOut = l;
+    if (icon) {
+        lv_obj_t* img = mkIcon(b, icon, btnIconPx(), tc);
+        if (iconOut) *iconOut = img;
+    } else {
+        lv_obj_t* l = mkLabel(b, text, tc, kBtn);
+        if (lblOut) *lblOut = l;
+    }
     if (cb) lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, ud);
     if (lcdInputGroup()) lv_group_add_obj(lcdInputGroup(), b);
     return b;
@@ -930,6 +1002,7 @@ void refreshRoom();
 void refreshRoomsPg();
 void refreshInfo();
 void pttRelease();
+void stopLevel();
 
 void dropPage(lv_obj_t*& o) {
     if (o) lv_obj_delete(o);
@@ -937,7 +1010,7 @@ void dropPage(lv_obj_t*& o) {
 }
 
 void showScreen(Screen sc) {
-    if (g_screen == SC_ROOM && sc != SC_ROOM) pttRelease();
+    if (g_screen == SC_ROOM && sc != SC_ROOM) { pttRelease(); stopLevel(); }
     g_screen = sc;
     lv_obj_t* want = sc == SC_LIST ? s_list : sc == SC_SERVER ? s_server : sc == SC_ROOM ? s_room
                    : sc == SC_ROOMS ? s_roomsPg : sc == SC_INFO ? s_info : s_member;
@@ -1404,11 +1477,13 @@ Header    g_roomHdr;
 lv_obj_t* s_roomNote = nullptr;         /* status while not live */
 lv_obj_t* s_talk = nullptr;             /* talk bar: indicator and hold button */
 lv_obj_t* s_talkLbl = nullptr;
+lv_obj_t* s_talkLvl = nullptr;          /* the microphone level along the bar's foot */
 lv_obj_t* s_muteBtn = nullptr;
-lv_obj_t* s_muteLbl = nullptr;
+lv_obj_t* s_muteIcon = nullptr;
 lv_obj_t* s_deafBtn = nullptr;
-lv_obj_t* s_deafLbl = nullptr;
+lv_obj_t* s_deafIcon = nullptr;
 lv_obj_t* s_roomsBtn = nullptr;
+lv_timer_t* g_lvlTimer = nullptr;       /* runs only while talking on the room screen */
 lv_obj_t* s_memCol = nullptr;           /* members (scrolls) */
 lv_obj_t* s_log = nullptr;              /* the log's scroll container */
 lv_obj_t* s_logCol = nullptr;
@@ -1421,6 +1496,30 @@ void pttRelease() {
     if (!g_pttHeld) return;
     g_pttHeld = false;
     storageSet("lxst.cmd.ptt", "0");
+}
+
+/* The level fill: lxstMicLevel() as a share of the bar's inner width, inset
+ * from the rounded corners. */
+void drawLevel() {
+    if (!s_talk || !s_talkLvl) return;
+    int inset = lcdPx(4);
+    int w = lv_obj_get_width(s_talk) - 2 * inset;
+    int fill = w > 0 ? w * lxstMicLevel() / 100 : 0;
+    lv_obj_set_width(s_talkLvl, fill);
+    showIf(s_talkLvl, fill > 0);
+}
+void stopLevel() {
+    if (g_lvlTimer) { lv_timer_delete(g_lvlTimer); g_lvlTimer = nullptr; }
+    showIf(s_talkLvl, false);
+}
+void lvlTimerCb(lv_timer_t*) { drawLevel(); }
+/* The meter runs while we transmit and the room screen is in front. */
+void levelFollow(bool talking) {
+    if (talking && s_layer && g_shown && g_screen == SC_ROOM) {
+        if (!g_lvlTimer) { g_lvlTimer = lv_timer_create(lvlTimerCb, 60, nullptr); drawLevel(); }
+    } else {
+        stopLevel();
+    }
 }
 
 /* What the talk bar says and whether holding it talks. */
@@ -1437,15 +1536,17 @@ void refreshTalk() {
 
     std::string text;
     uint32_t bg = C_BAR, fg = C_SUB, border = C_RULE;
+    bool sending = false;
     g_canTalk = false;
     if (!live)                     text = "Not in a room";
     else if (!audio)               text = "text only";
-    else if (!can || srvMuted)     text = srvMuted ? "listen only" + std::string(DOT) + "muted by the server" : "listen only";
+    else if (!can || srvMuted)     text = srvMuted ? "Muted by server" : "listen only";
     else if (!route.empty())       { text = route; fg = C_AMBER; }
-    else if (selfMuted())          text = "Muted" + std::string(DOT) + "unmute to talk";
+    else if (selfMuted())          text = "Muted";
     else if (talking) {
         text = LV_SYMBOL_AUDIO "  Talking";
         bg = C_OK; fg = 0x0A0F0A; border = C_OK;
+        sending = true;
     } else if (storageGetStr("lxst.state", "idle") != "live") {
         text = "Voice starting\xE2\x80\xA6";
     } else if (tx == "vox") {
@@ -1454,11 +1555,12 @@ void refreshTalk() {
         text = "Open mic"; fg = C_ACT; border = C_FIELD; bg = C_TALKRDY;
     } else {
         bool mic = lcdKeyDeclared(LCD_KEY_PTT), space = lcdKeyDeclared(LCD_KEY_SPACE);
-        text = mic && space ? "Hold Mic or Space to talk" : mic ? "Hold Mic to talk"
-             : space ? "Hold Space or here to talk" : "Hold here to talk";
+        text = mic && space ? "Hold Mic/Space" : mic ? "Hold Mic to talk"
+             : space ? "Hold Space or here" : "Hold here to talk";
         fg = C_ACT; border = C_ACCENT; bg = C_TALKRDY;
         g_canTalk = true;
     }
+    levelFollow(sending);
     if (talking && live && audio) g_canTalk = g_canTalk || tx == "ptt" || tx.empty();
     if (g_pttHeld && !talking && g_canTalk) bg = C_TALKDN;
     if (!g_canTalk) pttRelease();
@@ -1472,8 +1574,8 @@ void refreshTalk() {
     showIf(s_deafBtn, toggles);
     if (toggles) {
         bool m = selfMuted(), d = selfDeaf();
-        lv_label_set_text(s_muteLbl, m ? "Unmute" : "Mute");
-        lv_label_set_text(s_deafLbl, d ? "Undeafen" : "Deafen");
+        setIcon(s_muteIcon, m ? IC_MIC_OFF : IC_MIC, C_ACT);
+        setIcon(s_deafIcon, d ? IC_HEADSET_OFF : IC_HEADSET, C_ACT);
         if (m) lv_obj_add_state(s_muteBtn, LV_STATE_CHECKED); else lv_obj_remove_state(s_muteBtn, LV_STATE_CHECKED);
         if (d) lv_obj_add_state(s_deafBtn, LV_STATE_CHECKED); else lv_obj_remove_state(s_deafBtn, LV_STATE_CHECKED);
     }
@@ -1913,6 +2015,15 @@ void buildRoomShell() {
     lv_obj_remove_flag(s_talk, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(s_talk, LV_OBJ_FLAG_CLICK_FOCUSABLE);
     lv_obj_set_ext_click_area(s_talk, lcdPx(4));
+    /* The level fill sits under the label, a thin strip along the bar's foot. */
+    s_talkLvl = lv_obj_create(s_talk);
+    lv_obj_remove_style_all(s_talkLvl);
+    lv_obj_remove_flag(s_talkLvl, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(s_talkLvl, 0, lcdPx(3));
+    lv_obj_set_style_bg_color(s_talkLvl, lv_color_hex(C_LEVEL), 0);
+    lv_obj_set_style_bg_opa(s_talkLvl, LV_OPA_COVER, 0);
+    lv_obj_align(s_talkLvl, LV_ALIGN_BOTTOM_LEFT, lcdPx(4), -lcdPx(2));
+    lv_obj_add_flag(s_talkLvl, LV_OBJ_FLAG_HIDDEN);
     s_talkLbl = mkLabel(s_talk, "", C_SUB, kBold);
     lv_label_set_long_mode(s_talkLbl, LV_LABEL_LONG_MODE_DOTS);
     lv_obj_set_width(s_talkLbl, lv_pct(96));
@@ -1921,8 +2032,8 @@ void buildRoomShell() {
     lv_obj_add_event_cb(s_talk, onTalkEvent, LV_EVENT_PRESSED, nullptr);
     lv_obj_add_event_cb(s_talk, onTalkEvent, LV_EVENT_RELEASED, nullptr);
     lv_obj_add_event_cb(s_talk, onTalkEvent, LV_EVENT_PRESS_LOST, nullptr);
-    s_muteBtn = mkButton(tr, "Mute", BTN_GHOST, onMute, nullptr, &s_muteLbl);
-    s_deafBtn = mkButton(tr, "Deafen", BTN_GHOST, onDeaf, nullptr, &s_deafLbl);
+    s_muteBtn = mkButton(tr, "", BTN_GHOST, onMute, nullptr, nullptr, IC_MIC, &s_muteIcon);
+    s_deafBtn = mkButton(tr, "", BTN_GHOST, onDeaf, nullptr, nullptr, IC_HEADSET, &s_deafIcon);
     s_roomsBtn = mkButton(tr, "Rooms", BTN_GHOST, [](lv_event_t*) { openRooms(); });
     for (lv_obj_t* b : { s_muteBtn, s_deafBtn, s_roomsBtn }) {
         lv_obj_set_style_pad_hor(b, lcdPx(6), 0);
@@ -2386,7 +2497,8 @@ void resetHandles() {
     s_srvMotdBox = s_srvMotd = s_srvConn = s_srvConnLbl = s_srvOpen = s_srvForget = nullptr;
     g_pickSel.clear(); g_pickOpen = false;
     g_roomHdr = Header{};
-    s_roomNote = s_talk = s_talkLbl = s_muteBtn = s_muteLbl = s_deafBtn = s_deafLbl = s_roomsBtn = nullptr;
+    s_roomNote = s_talk = s_talkLbl = s_talkLvl = s_muteBtn = s_muteIcon = s_deafBtn = s_deafIcon = s_roomsBtn = nullptr;
+    g_icons.clear();
     s_memCol = s_log = s_logCol = s_compose = s_count = nullptr;
     g_logRows.clear(); g_logOrder.clear(); g_logDirty.clear();
     g_logReload = false; g_logSeen = 0;
@@ -2404,6 +2516,8 @@ void partylineApp(lv_obj_t* root) {
      * stop or an eviction rebuilds instead of trusting widgets that are gone. */
     resetHandles();
     g_metaTimer = nullptr; g_toastTimer = nullptr;
+    if (g_iconTimer) { lv_timer_delete(g_iconTimer); g_iconTimer = nullptr; }
+    if (g_lvlTimer)  { lv_timer_delete(g_lvlTimer);  g_lvlTimer = nullptr; }
     g_dSaved = g_dHeard = g_dRooms = g_dMembers = g_dConn = g_dLog = g_dStats = false;
     g_screen = SC_LIST;
     g_shown = true;
@@ -2482,6 +2596,7 @@ void PartylineApp::onHide()
     g_shown = false;
     if (!s_layer) return;
     pttRelease();
+    stopLevel();
     updateSpaceClaim();
 }
 
@@ -2494,6 +2609,8 @@ void PartylineApp::onClose()
     if (g_metaTimer)  { lv_timer_delete(g_metaTimer);  g_metaTimer = nullptr; }
     if (g_toastTimer) { lv_timer_delete(g_toastTimer); g_toastTimer = nullptr; }
     if (g_tickTimer)  { lv_timer_delete(g_tickTimer);  g_tickTimer = nullptr; }
+    if (g_iconTimer)  { lv_timer_delete(g_iconTimer);  g_iconTimer = nullptr; }
+    if (g_lvlTimer)   { lv_timer_delete(g_lvlTimer);   g_lvlTimer = nullptr; }
     resetHandles();
     g_screen = SC_LIST;
 }
