@@ -14,7 +14,7 @@
  *
  *   s.partyline.servers.<dest>.{name,ident,auto,room}   saved servers
  *   partyline.heard.<dest>.{name,flags,desc,lang,country,hops,seen}
- *   partyline.{server,state,status,name,motd,sid,room,can_speak,audio,tx_blocked}
+ *   partyline.{server,state,status,name,motd,sid,room,can_speak,audio,tx_blocked,rejoined}
  *   partyline.rooms.<id>.*  partyline.members.<mid>.*  partyline.log.<n>.*
  *   lxst.{state,talking,profile,stats.*}  s.lxst.tx
  *
@@ -25,7 +25,9 @@ import { ref, computed, watch, effectScope, type ComputedRef } from 'vue'
 import { useDeviceStore } from 'spangap-browser/stores/device'
 import { registerApp } from 'spangap-browser/lib/apps'
 import { registerWindowMount } from 'spangap-browser/lib/windowMounts'
+import { registerTopbarIcon } from 'spangap-browser/lib/topbarIcons'
 import PartylineWindow from '../panels/PartylineWindow.vue'
+import PartylineIndicator from '../components/partyline/PartylineIndicator.vue'
 import {
   audioActive, audioOwner, audioOnDevice, channelState, ctxState, micState, micLevel, talkKeyHeldBy,
   startAudio as startSharedAudio, resumeAudio, stopAudio as stopSharedAudio, setTalkKey as setSharedTalkKey,
@@ -46,6 +48,11 @@ export const partylineFocus = ref(0)
 
 /* Dock action: only ever show + raise, never hide. */
 export function showPartyline() { partylineVisible.value = true; partylineFocus.value++ }
+
+/** "Rejoined <room>" for REJOIN_MS after a retry lands in a room, else ''. */
+export const rejoinNotice = ref('')
+const REJOIN_MS = 4000
+let rejoinTimer: ReturnType<typeof setTimeout> | undefined
 
 export type LinkState = 'idle' | 'connecting' | 'joining' | 'live' | 'denied' | 'lost' | ''
 
@@ -498,6 +505,16 @@ function build(): UsePartyline {
     if (st === 'idle' || st === 'denied' || st === '') stopAudio()
   })
 
+  /* partyline.rejoined going from '' to a name is a retry landing in a room:
+   * the top-bar indicator shows it once. A value first seen in a dump (old
+   * undefined) is not news. */
+  watch(() => device.get('partyline.rejoined'), (now, old) => {
+    if (old !== '' || now == null || now === '' || typeof now === 'object') return
+    rejoinNotice.value = `Rejoined ${String(now)}`
+    if (rejoinTimer) clearTimeout(rejoinTimer)
+    rejoinTimer = setTimeout(() => { rejoinNotice.value = ''; rejoinTimer = undefined }, REJOIN_MS)
+  })
+
   /* Gestures that join a room start audio here, unless joining as text only. */
   const wantAudio = () => { if (!textOnly.value) startAudio() }
   const listen = () => { if (!textOnly.value) startAudio() }
@@ -547,4 +564,7 @@ export function registerPartyline() {
 
   registerWindowMount({ id: 'partyline', title: 'Partyline', component: PartylineWindow,
                         visible: partylineVisible, focusToken: partylineFocus })
+
+  /* Header chip: the room we are in. */
+  registerTopbarIcon({ id: 'partyline-room', component: PartylineIndicator })
 }

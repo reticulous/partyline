@@ -34,9 +34,14 @@
               <div class="topic">
                 <button v-if="compact" class="back" title="Back" @click="clearSel">‹</button>
                 <span class="hdot" :class="dot" />
-                <span class="sn" title="Server" @click="showServer(s.server)">{{ serverName }}</span>
-                <span v-if="roomName" class="rn">› {{ roomName }}</span>
+                <span class="hd" :title="headTitle">
+                  <template v-if="roomName">In <b>{{ roomName }}</b> on </template>
+                  <template v-else>Not in a room · </template>
+                  <span class="sn" title="Server" @click="showServer(s.server)">{{ serverName }}</span>
+                  <template v-if="roomName"> · {{ hereCount }} here</template>
+                </span>
                 <span class="sp" />
+                <button v-if="holding" class="btn lv" title="Leave the room and disconnect" @click="pl.disconnect()">Leave</button>
                 <span class="mem" :class="{ on: treeShown }" title="Rooms and members" @click="treeShown = !treeShown">
                   <q-icon :name="matPeople" size="16px" /> {{ pl.members.value.length }}
                 </span>
@@ -215,6 +220,9 @@ const roomNameOf = (id: string) => {
   return r ? (r.name || `room ${r.id}`) : ''
 }
 const roomName = computed(() => roomNameOf(s.value.room))
+const hereCount = computed(() => s.value.room === '' ? 0 : pl.members.value.filter(m => m.room === s.value.room).length)
+const headTitle = computed(() => roomName.value
+  ? `In ${roomName.value} on ${serverName.value} · ${hereCount.value} here` : `Not in a room · ${serverName.value}`)
 const dot = computed(() => {
   switch (s.value.state) {
     case 'live': return 'up'
@@ -365,10 +373,12 @@ watch(focusedWindowId, (id) => { if (id !== 'partyline') pl.setPtt(false) })
 .hdot.up { background: #4abf6a; }
 .hdot.busy { background: #d6a12a; }
 .hdot.down { background: #c0504d; }
-.sn { font-weight: 700; font-size: calc(14px * var(--rfs, 1)); white-space: nowrap; overflow: hidden;
-      text-overflow: ellipsis; min-width: 0; cursor: pointer; }
+.hd { color: #cfcfcf; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.hd b { color: #fff; font-size: calc(14px * var(--rfs, 1)); }
+.sn { cursor: pointer; }
 .sn:hover { text-decoration: underline; }
-.rn { color: #cfcfcf; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.btn.lv { flex: none; padding: 2px 10px; border-color: #7a2f2f; color: #f0a0a0; }
+.btn.lv:hover { background: rgba(192, 80, 77, .15); }
 .sp { flex: 1; }
 .mem { display: inline-flex; align-items: center; gap: 3px; color: #9a9a9a; font-size: calc(12px * var(--rfs, 1));
        padding: 1px 6px; border-radius: 5px; white-space: nowrap; cursor: pointer; flex: none; }

@@ -38,6 +38,9 @@
  *                                          CONFIG)
  *   partyline.sid                          our member id
  *   partyline.room                         the id of the room we are in ("" = none)
+ *   partyline.rejoined                     the room's name once a retry after a lost Link
+ *                                          lands in it; "" from the loss, a connect or a
+ *                                          disconnect on
  *   partyline.can_speak                    1 when this member may transmit here
  *   partyline.audio                        1 when a voice session is open for the room
  *   partyline.rooms.<id>.{name,profile,profile_text,frame_ms,access,desc,ptt_jitter_ms,

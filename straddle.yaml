@@ -33,3 +33,5 @@ settings:
       - caption: "The name others in the room see."
       - switch: { label: "Join without audio", key: "s.partyline.text_only" }
       - caption: "Joins rooms for their text only: the server keeps you muted and deafened and sends you no voice."
+      - integer: { label: "Pre-roll", unit: "ms", key: "s.partyline.preroll_ms", min: 0, max: 1000, step: 50 }
+      - caption: "In push-to-talk rooms, keeps this device's microphone open while you are in the room and sends this much of what it heard before you pressed the talk key, so the start of what you say is not cut off. 0 is off. Uses more power."

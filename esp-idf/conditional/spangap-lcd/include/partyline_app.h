@@ -34,4 +34,9 @@ public:
      *  handle (the shared subscriptions outlive the layer) and deletes pending
      *  timers. */
     void onClose() override;
+
+protected:
+    /** Puts the room in the status bar and the live badge on the tile, from
+     *  boot, whatever app is on screen. */
+    void appInit() override;
 };

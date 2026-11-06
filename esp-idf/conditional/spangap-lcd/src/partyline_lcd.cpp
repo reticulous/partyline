@@ -17,8 +17,9 @@
  *     itself are offered when that is not settled), the room to ask for, the
  *     room and server passwords, the message of the day, Connect / Disconnect
  *     and Forget (which asks first).
- *   - Room: the header names the room and server, with the room's codec
- *     profile and a PTT marker for a push-to-talk room. Under it the talk bar,
+ *   - Room: the header reads "In <room> on <server> · N here", with the
+ *     room's codec profile, a PTT marker for a push-to-talk room and Leave
+ *     (a disconnect). Under it the talk bar,
  *     lit while lxst.talking is 1 with the microphone level (lxstMicLevel())
  *     along its foot, saying how to talk here (or "listen only", "text only",
  *     or partyline.tx_blocked's reason when the first hop carries none of our
@@ -1391,7 +1392,7 @@ void refreshServer() {
     int hops = h != g_heard.end() ? h->second.hops : 0;
     setTitleLine(g_srvHdr.line, serverName(g_server), hops > 0 ? DOT + hopsText(hops) : "");
     if (s_srvStatus) {
-        std::string text = held && st != "idle" ? plStatus() : "Not connected";
+        std::string text = held && st != "idle" ? plStatus() : "Not in a room";
         if (text.empty()) text = st;
         lv_label_set_text(s_srvStatus, text.c_str());
         lv_obj_set_style_text_color(s_srvStatus, lv_color_hex(st == "live" ? C_OK : st == "denied" ? C_AMBER : 0xFFFFFF), 0);
@@ -1475,6 +1476,7 @@ void openServer(const std::string& dest) {
 
 Header    g_roomHdr;
 lv_obj_t* s_roomNote = nullptr;         /* status while not live */
+lv_obj_t* s_leaveBtn = nullptr;         /* header Leave, while a server is held */
 lv_obj_t* s_talk = nullptr;             /* talk bar: indicator and hold button */
 lv_obj_t* s_talkLbl = nullptr;
 lv_obj_t* s_talkLvl = nullptr;          /* the microphone level along the bar's foot */
@@ -1956,8 +1958,18 @@ void refreshRoomHeader() {
     if (!s_room) return;
     std::string rid = curRoomId();
     std::string held = plServer();
-    std::string title = rid.empty() ? std::string("No room") : roomName(rid);
-    setTitleLine(g_roomHdr.line, title, held.empty() ? "" : DOT + serverName(held));
+    std::string title = rid.empty() ? std::string("Not in a room") : roomName(rid);
+    std::string sub;
+    if (!rid.empty()) {
+        int here = 0;
+        for (auto& [mid, m] : g_members) if (memberInRoom(m, rid)) here++;
+        setTitleLine(g_roomHdr.line, "In " + title,
+                     (held.empty() ? std::string() : " on " + serverName(held)) + DOT +
+                     std::to_string(here) + " here");
+    } else {
+        setTitleLine(g_roomHdr.line, title, held.empty() ? "" : DOT + serverName(held));
+    }
+    showIf(s_leaveBtn, !held.empty() && stateActive(plState()));
     std::string right;
     auto r = g_rooms.find(rid);
     if (r != g_rooms.end()) {
@@ -1971,7 +1983,7 @@ void refreshRoomHeader() {
     if (s_roomNote) {
         std::string st = plState();
         std::string text = st == "live" ? "" : plStatus();
-        if (st != "live" && text.empty()) text = held.empty() ? "Not connected" : st;
+        if (st != "live" && text.empty()) text = held.empty() ? "Not in a room" : st;
         lv_label_set_text(s_roomNote, text.c_str());
         lv_obj_set_style_text_color(s_roomNote, lv_color_hex(st == "denied" || st == "lost" ? C_AMBER : C_SUB), 0);
         showIf(s_roomNote, !text.empty());
@@ -1989,9 +2001,14 @@ void buildRoomShell() {
     s_room = mkScreen();
     g_roomHdr = mkHeader(s_room, [](lv_event_t*) { goList(); }, [](lv_event_t*) { openInfo(); });
     lv_obj_set_width(g_roomHdr.right, LV_SIZE_CONTENT);
-    lv_obj_set_style_max_width(g_roomHdr.right, lcdPx(120), 0);
+    lv_obj_set_style_max_width(g_roomHdr.right, lcdPx(90), 0);
     lv_label_set_long_mode(g_roomHdr.right, LV_LABEL_LONG_MODE_DOTS);
     roomKeys(g_roomHdr.back);
+    s_leaveBtn = mkButton(g_roomHdr.bar, "Leave", BTN_DANGER,
+                          [](lv_event_t*) { storageSet("partyline.cmd.disconnect", "1"); });
+    lv_obj_set_style_pad_ver(s_leaveBtn, lcdPx(2), 0);
+    lv_obj_set_style_pad_hor(s_leaveBtn, lcdPx(6), 0);
+    roomKeys(s_leaveBtn);
 
     s_roomNote = mkLabel(s_room, "", C_SUB, kSmall);
     lv_label_set_long_mode(s_roomNote, LV_LABEL_LONG_MODE_WRAP);
@@ -2497,7 +2514,7 @@ void resetHandles() {
     s_srvMotdBox = s_srvMotd = s_srvConn = s_srvConnLbl = s_srvOpen = s_srvForget = nullptr;
     g_pickSel.clear(); g_pickOpen = false;
     g_roomHdr = Header{};
-    s_roomNote = s_talk = s_talkLbl = s_talkLvl = s_muteBtn = s_muteIcon = s_deafBtn = s_deafIcon = s_roomsBtn = nullptr;
+    s_roomNote = s_leaveBtn = s_talk = s_talkLbl = s_talkLvl = s_muteBtn = s_muteIcon = s_deafBtn = s_deafIcon = s_roomsBtn = nullptr;
     g_icons.clear();
     s_memCol = s_log = s_logCol = s_compose = s_count = nullptr;
     g_logRows.clear(); g_logOrder.clear(); g_logDirty.clear();
@@ -2555,11 +2572,150 @@ void partylineApp(lv_obj_t* root) {
     }
 }
 
+/* ---- the status-bar item and the launcher badge ----
+ * From boot, over every app: while in a room, a headset (a struck microphone
+ * while muted, a struck headset while deafened) and the room name clipped to
+ * SB_ROOM_MAX characters, green while anyone in the room speaks; the tile has
+ * a green dot while live. partyline.rejoined going from "" to a name shows
+ * "Rejoined <room>" there for TOAST_MS, and as a toast in the app if it is up.
+ * Its own subscription and timers: nothing here touches the app layer's
+ * handles. */
+
+const uint32_t SB_IDLE     = 0xCFD8E3;
+const size_t   SB_ROOM_MAX = 16;
+
+PartylineApp* g_app = nullptr;
+lv_obj_t*   s_sb = nullptr;
+lv_obj_t*   s_sbIcon = nullptr;
+lv_obj_t*   s_sbLbl = nullptr;
+const char* g_sbIconBase = nullptr;
+bool        g_sbIconSet = false;
+int         g_sbIconTicks = 0;
+lv_timer_t* g_sbTimer = nullptr;       /* debounce */
+lv_timer_t* g_sbIconTimer = nullptr;   /* re-sources the icon until its raster lands */
+lv_timer_t* g_sbNoteTimer = nullptr;   /* ends the "Rejoined" line */
+std::string g_sbNote;
+std::string g_sbRejoined;
+bool        g_sbRejoinedRead = false;
+
+int sbIconPx() { return lcdPx(12); }
+
+/* At most `max` UTF-8 characters, an ellipsis when cut. */
+std::string clipChars(const std::string& s, size_t max) {
+    size_t n = 0;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (((unsigned char)s[i] & 0xC0) == 0x80) continue;
+        if (n++ == max) return s.substr(0, i) + "\xE2\x80\xA6";
+    }
+    return s;
+}
+
+bool sbSourceIcon() {
+    const lv_image_dsc_t* dsc = lcdIconDsc(g_sbIconBase, sbIconPx());
+    if (dsc) { lv_image_set_src(s_sbIcon, dsc); g_sbIconSet = true; }
+    else lcdIconRequest(g_sbIconBase, sbIconPx());
+    return g_sbIconSet;
+}
+void sbIconTimerCb(lv_timer_t*) {
+    if (sbSourceIcon() || ++g_sbIconTicks >= 50) {
+        lv_timer_delete(g_sbIconTimer);
+        g_sbIconTimer = nullptr;
+    }
+}
+void sbSetIcon(const char* base, uint32_t color) {
+    lv_obj_set_style_image_recolor(s_sbIcon, lv_color_hex(color), 0);
+    lv_obj_set_style_image_recolor_opa(s_sbIcon, LV_OPA_COVER, 0);
+    if (g_sbIconBase != base) { g_sbIconBase = base; g_sbIconSet = false; }
+    if (g_sbIconSet || sbSourceIcon()) return;
+    g_sbIconTicks = 0;
+    if (!g_sbIconTimer) g_sbIconTimer = lv_timer_create(sbIconTimerCb, 80, nullptr);
+}
+
+void sbRefresh() {
+    if (!s_sb) return;
+    std::string rid = storageGetStr("partyline.room", "");
+    bool live = plState() == "live";
+    bool inRoom = live && !rid.empty();
+
+    std::string rj = storageGetStr("partyline.rejoined", "");
+    if (g_sbRejoinedRead && g_sbRejoined.empty() && !rj.empty()) {
+        std::string room = printable(rj, true);
+        g_sbNote = "Rejoined " + clipChars(room, SB_ROOM_MAX);
+        showToast("Rejoined " + room, C_OK);
+        if (g_sbNoteTimer) lv_timer_delete(g_sbNoteTimer);
+        g_sbNoteTimer = lv_timer_create([](lv_timer_t*) {
+            g_sbNoteTimer = nullptr;   /* one-shot: LVGL frees it after this returns */
+            g_sbNote.clear();
+            sbRefresh();
+        }, TOAST_MS, nullptr);
+        lv_timer_set_repeat_count(g_sbNoteTimer, 1);
+    }
+    g_sbRejoined = rj;
+    g_sbRejoinedRead = true;
+
+    if (g_app) { if (live) g_app->setBadge("", C_OK); else g_app->clearBadge(); }
+
+    if (!inRoom) { showIf(s_sb, false); return; }
+    std::map<std::string, Member> mem;
+    s_memAcc = &mem;
+    storageForEach("partyline.members.", memberLeaf);
+    s_memAcc = nullptr;
+    std::string sid = storageGetStr("partyline.sid", "");
+    std::string roomRec = storageGetStr(("partyline.rooms." + rid + ".name").c_str(), "");
+    bool speaking = false, muted = false, deaf = false;
+    for (auto& [mid, m] : mem) {
+        bool self = m.self || (!sid.empty() && mid == sid);
+        if (self) { muted = m.muted != 0; deaf = m.deaf != 0; }
+        bool here = m.room == rid || (!roomRec.empty() && m.room == roomRec);
+        if (here && m.speaking) speaking = true;
+    }
+    uint32_t color = speaking ? C_OK : SB_IDLE;
+    sbSetIcon(deaf ? IC_HEADSET_OFF : muted ? IC_MIC_OFF : IC_HEADSET, color);
+    std::string name = printable(roomRec, true);
+    if (name.empty()) name = rid;
+    lv_label_set_text(s_sbLbl, g_sbNote.empty() ? clipChars(name, SB_ROOM_MAX).c_str() : g_sbNote.c_str());
+    lv_obj_set_style_text_color(s_sbLbl, lv_color_hex(color), 0);
+    showIf(s_sb, true);
+}
+
+void sbTimerCb(lv_timer_t*) { g_sbTimer = nullptr; sbRefresh(); }
+
+void sbOnChange(const char* key, const char*) {
+    if (!key) return;
+    if (startsWith(key, "partyline.log") || startsWith(key, "partyline.heard.") ||
+        startsWith(key, "partyline.stats.") || startsWith(key, "partyline.cmd.") ||
+        startsWith(key, "partyline.servers.")) return;
+    if (g_sbTimer) return;
+    g_sbTimer = lv_timer_create(sbTimerCb, DEBOUNCE_MS, nullptr);
+    lv_timer_set_repeat_count(g_sbTimer, 1);
+}
+
+void sbInit(void*) {
+    s_sb = lcdStatusbarAddIndicator();
+    if (!s_sb) return;
+    lv_obj_set_style_pad_column(s_sb, lcdPx(3), 0);
+    s_sbIcon = lv_image_create(s_sb);
+    lv_obj_remove_flag(s_sbIcon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(s_sbIcon, sbIconPx(), sbIconPx());
+    s_sbLbl = lv_label_create(s_sb);
+    if (const lv_font_t* f = lcdFont(LcdFace::UI, lcdPx(12))) lv_obj_set_style_text_font(s_sbLbl, f, 0);
+    lv_label_set_text(s_sbLbl, "");
+    lv_obj_add_flag(s_sb, LV_OBJ_FLAG_HIDDEN);
+    storageSubscribeChanges("partyline.", sbOnChange);
+    sbRefresh();
+}
+
 }  // namespace
 
 PartylineApp::PartylineApp() : LcdApp({ .name = "Partyline", .iconBasename = "partyline" }) {}
 
 void PartylineApp::onCreate(lv_obj_t* root) { partylineApp(root); }
+
+void PartylineApp::appInit()
+{
+    g_app = this;
+    lcdRun(sbInit, nullptr);
+}
 
 bool PartylineApp::onBack()
 {

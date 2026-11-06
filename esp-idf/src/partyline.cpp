@@ -294,6 +294,9 @@ static std::map<int64_t, int>             s_roomCount;
 static std::map<int64_t, Member>          s_members;
 
 static Retry s_retry;
+/* A retry is under way: the room the session lands in is published as
+ * partyline.rejoined. A connect, disconnect, forget or refusal ends it. */
+static bool  s_rejoining = false;
 
 static uint8_t* s_linkBuf = nullptr;
 
@@ -582,6 +585,9 @@ static bool lxProfileFor(const plwire::Profile& p, int64_t frame_ms, lxst_profil
     out.can_speak = speakNow() ? 1 : 0;
     out.tx_mode = LXST_TX_SETTING;
     out.rx_any = 0;
+    /* Pre-roll only in a push-to-talk room (one with a push-to-talk jitter). */
+    int pre = jitter ? storageGetInt("s.partyline.preroll_ms", 0) : 0;
+    out.preroll_ms = (uint16_t)(pre < 0 ? 0 : pre > LXST_PREROLL_MAX_MS ? LXST_PREROLL_MAX_MS : pre);
     return true;
 }
 
@@ -641,6 +647,13 @@ static void lxEnter(const plwire::Profile& p, int64_t frame_ms, bool moved)
 
 /** Reopen the voice session lxst dropped while we are still in a room with
  *  audio; a refusal tries again after PL_VOICE_RETRY_MS. */
+/** s.partyline.preroll_ms changed: re-send the room's profile. */
+static void onPreroll(const char*, const char*)
+{
+    if (s_lx >= 0 && s_s.ph == PH_JOINED && s_s.inRoom && s_s.voiceProf)
+        lxEnter(*s_s.voiceProf, s_s.voiceFrameMs, false);
+}
+
 static void lxReopen(int64_t now)
 {
     if (!s_s.voiceReopenAt || now < s_s.voiceReopenAt) return;
@@ -808,6 +821,7 @@ static void scheduleRetry()
     s_retry.attempt++;
     s_retry.shown = -1;
     s_s.ph = PH_LOST;
+    storageSet("partyline.rejoined", "");
     publishState("lost", "Connection lost; retrying in " + std::to_string(base) + " s");
 }
 
@@ -948,6 +962,7 @@ static void sessionDenied(const std::string& reason)
     logSystem("Refused: " + reason);
     sessionEnd(false);
     s_retry = Retry{};
+    s_rejoining = false;
     s_s.ph = PH_DENIED;
     publishState("denied", "Refused: " + reason);
     info("partyline %s: refused: %s", dest.c_str(), reason.c_str());
@@ -1063,6 +1078,10 @@ static void onRoom(const plwire::Packet& p)
     s_s.movePending = false;
     s_s.movePw.clear();
     if (moved) logSystem("You are in " + name);
+    if (s_rejoining) {
+        s_rejoining = false;
+        storageSet("partyline.rejoined", name.c_str());
+    }
     for (auto& [mid, m] : s_members) setSpeaking(mid, false);
 
     s_s.voiceProf = r.profile;
@@ -1358,7 +1377,9 @@ static void cmdForget(const std::string& v)
     if (s_s.dest == d) {
         sessionEnd(true);
         s_retry = Retry{};
-        publishState("idle", "Not connected");
+        s_rejoining = false;
+        storageSet("partyline.rejoined", "");
+        publishState("idle", "Not in a room");
     }
     storageDeleteTree(("s.partyline.servers." + d).c_str());
     storageDeleteTree(("secrets.partyline.servers." + d).c_str());
@@ -1421,6 +1442,8 @@ static void cmdConnect(const std::string& v)
     }
     if (s_s.ph != PH_IDLE) sessionEnd(true);
     s_retry = Retry{};
+    s_rejoining = false;
+    storageSet("partyline.rejoined", "");
     if (!sessionOpen(d, ident) && s_s.ph == PH_IDLE) {
         cmdError("connect", "That identity is not available.");
         return;
@@ -1432,8 +1455,10 @@ static void cmdDisconnect()
 {
     bool held = s_s.ph != PH_IDLE;
     s_retry = Retry{};
+    s_rejoining = false;
     sessionEnd(true);
-    publishState("idle", "Not connected");
+    storageSet("partyline.rejoined", "");
+    publishState("idle", "Not in a room");
     if (held) logSystem("Disconnected");
     cmdDone("disconnect");
 }
@@ -1655,6 +1680,7 @@ static void tick()
     if (s_retry.armed && s_s.ph == PH_LOST) {
         if (now >= s_retry.at) {
             s_retry.armed = false;
+            s_rejoining = true;
             std::string d = s_s.dest, id = s_s.ident;
             sessionOpen(d, id);
         } else {
@@ -1904,11 +1930,13 @@ static volatile bool s_stop = false, s_parked = false;
 
 static void publishIdle()
 {
+    s_rejoining = false;
     clearRoster();
     storageBegin();
     storageSet("partyline.server", "");
     storageSet("partyline.state", "idle");
-    storageSet("partyline.status", "Not connected");
+    storageSet("partyline.status", "Not in a room");
+    storageSet("partyline.rejoined", "");
     storageSet("partyline.name", "");
     storageSet("partyline.motd", "");
     storageSet("partyline.sid", "");
@@ -1928,6 +1956,7 @@ static void partylineTaskMain(void*)
 
     storageSubscribeChanges("partyline.cmd.", onCmd);
     storageSubscribeChanges("rnsd.links." PL_TAG_PFX, onLinkState);
+    storageSubscribeChanges("s.partyline.preroll_ms", onPreroll);
     storageSet("partyline.log_next", 0);
 
     for (;;) {
@@ -1974,6 +2003,7 @@ void PartylineService::onInit()
     storageDefault("s.partyline.text_only", 0);
     storageDefault("s.partyline.muted", 0);
     storageDefault("s.partyline.deaf", 0);
+    storageDefault("s.partyline.preroll_ms", 0);
     storageEnd();
 
     cliRegisterCmd("partyline", cliPartyline);
